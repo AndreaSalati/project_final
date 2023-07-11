@@ -11,6 +11,8 @@ from sklearn.decomposition import PCA
 from noise_model import Noise_Model
 from collections import namedtuple
 
+# big functions that do big chnks of the notebook code
+
 
 def get_data_from_anndata(path, gene_list=None, cell_list=None):
     """
@@ -52,8 +54,8 @@ def get_data_from_anndata(path, gene_list=None, cell_list=None):
         sample_id[sample_names == s] = i
     dm = make_design_matrix(torch.tensor(sample_id, dtype=float))
 
-    data_pyro = data[:, gene_list]
-    return data, data_pyro, data.obs["n_c"].values, dm
+    data_zonated = data[:, gene_list]
+    return data, data_zonated, data.obs["n_c"].values, dm, sample_id
 
 
 def do_pca(data, pc=0):
@@ -105,12 +107,15 @@ def fit_coeff(data, x_unif, genes):
     return coef_pau
 
 
-def training(DATA, x_unif, coef_pau, n_c, dm, clamp, n_iter, dev):
+def training(DATA, x_unif, coef_pau, n_c, dm, clamp, n_iter, batch_size, dev):
     """
     This function is used to train the model on the data.
     """
     NC, NG = DATA.shape
     NS = dm.shape[1]
+    if batch_size == 0:
+        batch_size = NC
+
     # preparing the starting values for the optimization
     a0_pau = coef_pau[:, 0]
     a1_pau = coef_pau[:, 1]
@@ -145,7 +150,7 @@ def training(DATA, x_unif, coef_pau, n_c, dm, clamp, n_iter, dev):
     losses = []
     optimizer = torch.optim.Adam([x, a0, a1, disp], lr=0.001)
     batch_size = NC
-    # Optimize the variable to minimize the loss
+    # Optimize the latent variables to minimize the loss
     for step in range(n_iter):
         optimizer.zero_grad()  # zero the gradients
         output = loss_clamp_batch(x, a0, a1, disp, batch_size, MP, DATA)
@@ -158,7 +163,55 @@ def training(DATA, x_unif, coef_pau, n_c, dm, clamp, n_iter, dev):
     a0_final = a0.clone().cpu().detach().numpy()
     a1_final = a1.clone().cpu().detach().numpy()
 
-    return x_final, disp_final, a0_final, a1_final, losses
+    return x_final, a0_final, a1_final, disp_final, losses
+
+
+def shift_samples_per_mouse(x, a0, a1, sample_id, central, data):
+    """
+    This function is used to shift the samples per mouse.
+    This is done because diferent sample (mice) have different
+    are x values, and different mice look completely shifted to one another.
+    As this is not desirable, we alligned our sumple such as the are aligned
+    on the central (defualt) side.
+    """
+    xs = []
+    # computing the individual shifts
+    for s in np.unique(sample_id):
+        idx = sample_id == s
+        central_score = data[idx, central].layers["f_cg"].sum(1)
+        xx = x[idx]
+        rc = central_score.argsort().argsort() / idx.sum()
+        col = np.logical_and(rc > 0.9, rc < 0.99)
+        offset = np.median(xx[col])
+        xs.append(offset)
+
+    x_shifted, a0_shifted, a1_shifted = shift_parameters(x, a0, a1, xs, sample_id)
+
+    return x_shifted, a0_shifted, a1_shifted, xs
+
+
+def shift_parameters(x, a0, a1, shift, sample_id):
+    """
+    This function transforms all the model's parameters
+    accordingly to the shift that were found beforehand.
+    In particular it shifts the x, and trasform the intercept a0,
+    accordingly to the shift.
+    """
+
+    x_scaled = np.zeros(len(x), dtype=float)
+    a0_scaled = np.zeros(a0.shape, dtype=float)
+    a1_scaled = a1
+    for s in np.unique(sample_id):
+        idx = sample_id == s
+        xx = x[idx]
+        x_range = 1.0
+        x_scaled[idx] = (xx - shift[s]) / x_range
+        a0_scaled[s, :] = a0[s, :] + a1[:] * shift[s]
+        a1_scaled[:] = a1[:] * x_range
+    return x_scaled, a0_scaled, a1_scaled
+
+
+# smaller functions, called many times
 
 
 def loss_clamp_batch(x, a0, a1, disp, batch_size, mp, DATA):
@@ -292,32 +345,33 @@ def import_data_txt(location):
 
 
 # functions use for plotting results
-def f_norm(x, a0_pyro, a1_pyro, DM):
-    y = x[:, None] * a1_pyro[None, :]
-    y += np.matmul(DM[:, :], a0_pyro)
-    return np.exp(y)
+
+# def f_norm(x, a0_pyro, a1_pyro, DM):
+#     y = x[:, None] * a1_pyro[None, :]
+#     y += np.matmul(DM[:, :], a0_pyro)
+#     return np.exp(y)
 
 
-def f_single(x, a0_pyro, a1_pyro, DM):
-    y = x[:, None] * np.matmul(DM[:, :], a1_pyro)
-    y += np.matmul(DM[:, :], a0_pyro)
-    return np.exp(y)
+# def f_single(x, a0_pyro, a1_pyro, DM):
+#     y = x[:, None] * np.matmul(DM[:, :], a1_pyro)
+#     y += np.matmul(DM[:, :], a0_pyro)
+#     return np.exp(y)
 
 
-def f_norm_a0_mean(x, a0_pyro, a1_pyro):
-    y = x[:, None] * a1_pyro[None, :] + a0_pyro.mean(axis=0)
-    return np.exp(y)
+# def f_norm_a0_mean(x, a0_pyro, a1_pyro):
+#     y = x[:, None] * a1_pyro[None, :] + a0_pyro.mean(axis=0)
+#     return np.exp(y)
 
 
-def split_vector_into_subsets(vector, num_subsets):
-    avg = len(vector) // num_subsets
-    remainder = len(vector) % num_subsets
-    subsets = []
-    i = 0
-    for _ in range(num_subsets):
-        subset_size = avg + (1 if remainder > 0 else 0)
-        subset = vector[i : i + subset_size]
-        subsets.append(subset)
-        i += subset_size
-        remainder -= 1
-    return subsets
+# def split_vector_into_subsets(vector, num_subsets):
+#     avg = len(vector) // num_subsets
+#     remainder = len(vector) % num_subsets
+#     subsets = []
+#     i = 0
+#     for _ in range(num_subsets):
+#         subset_size = avg + (1 if remainder > 0 else 0)
+#         subset = vector[i : i + subset_size]
+#         subsets.append(subset)
+#         i += subset_size
+#         remainder -= 1
+#     return subsets

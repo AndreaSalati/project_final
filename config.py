@@ -15,7 +15,12 @@ central = [
 ]
 portal = ["Pck1", "Aldh1b1", "Ctsc", "Sds", "Hal", "Hsd17b13", "Cyp2f2"]
 genes = central + portal
-n_iter = 10
-dev = "cpu"
 
-# batch_size = NC
+
+dev = "cpu"
+clamp_gene = "Cyp2e1"  # gene to clamp
+
+
+# training parameters
+batch_size = 128  # batch size, put zero for full batch
+n_iter = 3000
