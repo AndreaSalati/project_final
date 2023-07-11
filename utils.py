@@ -11,7 +11,8 @@ from sklearn.decomposition import PCA
 from noise_model import Noise_Model
 from collections import namedtuple
 
-# big functions that do big chnks of the notebook code
+####################################################################################################
+# big functions apparing in main.py
 
 
 def get_data_from_anndata(path, gene_list=None, cell_list=None):
@@ -55,7 +56,7 @@ def get_data_from_anndata(path, gene_list=None, cell_list=None):
     dm = make_design_matrix(torch.tensor(sample_id, dtype=float))
 
     data_zonated = data[:, gene_list]
-    return data, data_zonated, data.obs["n_c"].values, dm, sample_id
+    return data, data_zonated, data.obs["n_c"].values, dm, sample_id, nn
 
 
 def do_pca(data, pc=0):
@@ -107,7 +108,72 @@ def fit_coeff(data, x_unif, genes):
     return coef_pau
 
 
-def training(DATA, x_unif, coef_pau, n_c, dm, clamp, n_iter, batch_size, dev):
+def training(data, x_unif, coef_pau, n_c, dm, clamp, n_iter, batch_size, dev):
+    """
+    This function is used to train the model on the data.
+    It's the only function where pytorch is used.
+    """
+    # set the device to use
+    torch.set_default_device(dev)
+    DATA = torch.tensor(data)
+    NC, NG = DATA.shape
+    NS = dm.shape[1]
+    if batch_size == 0:
+        batch_size = NC
+
+    # preparing the starting values for the optimization
+    a0_pau = coef_pau[:, 0]
+    a1_pau = coef_pau[:, 1]
+    scale = a1_pau[clamp]
+    a1_scaled = a1_pau / scale
+    x_scaled = x_unif * scale
+
+    mask = torch.eye(NG, dtype=float)
+    mask[clamp, clamp] = 0
+    fix = tt(1.0).detach()
+    log_n_UMI = torch.log(tt(n_c))
+    mp = dict(
+        log_n_UMI=log_n_UMI,
+        clamp=clamp,
+        dm=dm,
+        fix=fix,
+        mask=mask,
+        cutoff=50,
+    )
+    MyTuple = namedtuple("param", mp)
+    MP = MyTuple(**mp)
+
+    # initalizing the parameters (leafs)
+    disp = tt(np.log(0.3), requires_grad=True)
+    x = tt(x_scaled, requires_grad=True, dtype=float)
+    a1 = tt(a1_scaled, requires_grad=True, dtype=float)
+    a0 = tt(a0_pau, dtype=torch.float32)
+    a0 = a0.repeat(NS, 1)
+    a0.requires_grad = True
+
+    # training the model
+    losses = []
+    optimizer = torch.optim.Adam([x, a0, a1, disp], lr=0.001)
+    batch_size = NC
+    # Optimize the latent variables to minimize the loss
+    for step in range(n_iter):
+        optimizer.zero_grad()  # zero the gradients
+        output = loss_clamp_batch(x, a0, a1, disp, batch_size, MP, DATA)
+        output.backward()  # compute the gradients
+        optimizer.step()  # update the variable
+        losses.append(output.detach())
+
+    x_final = x.clone().cpu().detach().numpy()
+    disp_final = torch.exp(disp.clone()).cpu().detach().numpy()
+    a0_final = a0.clone().cpu().detach().numpy()
+    a1_final = a1.clone().cpu().detach().numpy()
+
+    return x_final, a0_final, a1_final, disp_final, losses
+
+
+def training_gene_selection(
+    DATA, x_unif, coef_pau, n_c, dm, clamp, n_iter, batch_size, dev
+):
     """
     This function is used to train the model on the data.
     """
@@ -166,6 +232,20 @@ def training(DATA, x_unif, coef_pau, n_c, dm, clamp, n_iter, batch_size, dev):
     return x_final, a0_final, a1_final, disp_final, losses
 
 
+def save_parameters(x, a0, a1, sample_names_uniq, name, data):
+    """
+    This function is used to save the parameters to a .txt file.
+    """
+    df_a0 = pd.DataFrame(a0, index=sample_names_uniq, columns=data.var.index)
+    df_a1 = pd.Series(a1, index=data.var.index)
+    df_x = pd.Series(x, index=data.obs.index)
+
+    # Write the DataFrame to a .txt file
+    df_a0.to_csv("coeff_values/" + name + "a0.txt", sep=",")
+    df_a1.to_csv("coeff_values/" + name + "a1.txt", sep=",")
+    df_x.to_csv("coeff_values/" + name + "x.txt", sep=",")
+
+
 def shift_samples_per_mouse(x, a0, a1, sample_id, central, data):
     """
     This function is used to shift the samples per mouse.
@@ -211,6 +291,7 @@ def shift_parameters(x, a0, a1, shift, sample_id):
     return x_scaled, a0_scaled, a1_scaled
 
 
+####################################################################
 # smaller functions, called many times
 
 
@@ -288,6 +369,35 @@ def loss_simple_batch(x, a0, a1, disp, batch_size, mp, DATA):
         total_count=r, probs=p, validate_args=None
     )
     return -NB.log_prob(DATA[idx, :]).sum() * (NC / batch_size)
+
+
+def loss_gene_selection(x, a0, a1, disp, batch_size, mp, DATA):
+    """
+    This loss function does not optimize x, but only a0 and a1.
+    It is used copute the likelihood of the data, and fits the
+    parameters than will later be used for the optimization of x.
+    """
+    NC = DATA.shape[0]
+
+    idx = torch.randperm(DATA.shape[0])[:batch_size]
+    y = (
+        mp.log_n_UMI[idx, None]
+        + torch.matmul(mp.dm[idx, :], a0)
+        + torch.matmul(mp.dm[idx, :], a1) * x[idx, None]
+    )
+    alpha = disp.exp()
+
+    y = mp.cutoff * torch.tanh(y / mp.cutoff)
+    lmbda = torch.exp(y)
+
+    r = 1 / alpha
+    p = alpha * lmbda / (1 + alpha * lmbda)
+    NB = torch.distributions.NegativeBinomial(
+        total_count=r, probs=p, validate_args=None
+    )
+    return -NB.log_prob(DATA[idx, :]).sum() * (
+        NC / batch_size
+    )  # correct the likelihood rescaling
 
 
 def make_design_matrix(cell_identifiers):

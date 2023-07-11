@@ -23,4 +23,7 @@ clamp_gene = "Cyp2e1"  # gene to clamp
 
 # training parameters
 batch_size = 128  # batch size, put zero for full batch
-n_iter = 3000
+n_iter = 3  # number of iterations
+
+# name of the output files
+name = "first_run"
