@@ -241,9 +241,9 @@ def save_parameters(x, a0, a1, sample_names_uniq, name, data):
     df_x = pd.Series(x, index=data.obs.index)
 
     # Write the DataFrame to a .txt file
-    df_a0.to_csv("coeff_values/" + name + "a0.txt", sep=",")
-    df_a1.to_csv("coeff_values/" + name + "a1.txt", sep=",")
-    df_x.to_csv("coeff_values/" + name + "x.txt", sep=",")
+    df_a0.to_csv("coeff_values/" + name + "_a0.txt", sep=",")
+    df_a1.to_csv("coeff_values/" + name + "_a1.txt", sep=",")
+    df_x.to_csv("coeff_values/" + name + "_x.txt", sep=",")
 
 
 def shift_samples_per_mouse(x, a0, a1, sample_id, central, data):

@@ -46,11 +46,11 @@ x_shifted, a0_shifted, a1_shifted, xs = shift_samples_per_mouse(
     x_, a0_, a1_, sample_id, cfg.central, data
 )
 
-# save_parameters(
-#     x_shifted,
-#     a0_shifted,
-#     a1_shifted,
-#     sample_names,
-#     cfg.name,
-#     data,
-# )
+save_parameters(
+    x_shifted,
+    a0_shifted,
+    a1_shifted,
+    sample_names,
+    cfg.name,
+    data,
+)
