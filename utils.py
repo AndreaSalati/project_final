@@ -17,9 +17,23 @@ from collections import namedtuple
 
 def get_data_from_anndata(path, gene_list=None, cell_list=None):
     """
-    This function is used to load the data from the anndata object.
-    It also performs some filtering and normalization. In this case we get rid of a specific sample,
-    filters too low mito content.
+    This function loads data from an AnnData object, performs filtering and normalization, and returns several outputs.
+    the function also removes the bad replicate, removes mitochondrial genes, and filters cells with an unusual number of reads + too low mito content.
+
+    Parameters:
+    path (str): The path to the AnnData object file.
+    gene_list (list, optional): A list of gene names to be retrieved. If None, all genes are retrieved.
+    cell_list (list, optional): A list of cell names to be retrieved. If None, all cells are retrieved.
+
+    Returns:
+    tuple: A tuple containing six elements:
+        - data (anndata.AnnData): The filtered and normalized AnnData object.
+        - data_zonated (anndata.AnnData): The AnnData object filtered to include only the genes specified in gene_list.
+        - n_c (numpy.ndarray): The sum of counts per cell.
+        - dm (torch.Tensor): The design matrix created from the sample identifiers.
+        - sample_id (numpy.ndarray): An array of sample identifiers, where each unique sample name is mapped to an integer.
+        - nn (numpy.ndarray): An array of unique sample names.
+
     """
     adatas = {"Tomaz": sc.read_h5ad(path)}
     data = anndata.concat(adatas, label="dataset", join="inner")
@@ -94,7 +108,6 @@ def fit_coeff(data, x_unif, genes):
     logN = np.log(data.obs["n_c"].values)
 
     for gi, g in enumerate(genes):
-
         yy = data[:, [g]].layers["n_cg"].toarray().squeeze()
         model_n = Noise_Model(yy, D, logN, noise)
 
@@ -110,8 +123,29 @@ def fit_coeff(data, x_unif, genes):
 
 def training(data, x_unif, coef_pau, n_c, dm, clamp, n_iter, batch_size, dev):
     """
-    This function is used to train the model on the data.
-    It's the only function where pytorch is used.
+    Trains a model using PyTorch on the provided dataset.
+
+    This function initializes and optimizes model parameters to fit the given data. It is the sole function where PyTorch is utilized for computational operations. The training involves gradient descent optimization using the Adam optimizer. The function also handles device setting for PyTorch operations.
+
+    Parameters:
+    data (array-like): The dataset used for training.
+    x_unif (array-like): Vector to initialize values of latent variable x.
+    coef_pau (array-like): Coefficients a1_g and a0_g of the model.
+    n_c (array-like): The number of counts per cell.
+    dm (array-like): The design matrix created from the sample identifiers.
+    clamp (int): An index specifying which dimension to clamp during training. It gets rid of one of the likelihood symmetries.
+    n_iter (int): Number of iterations for the training loop.
+    batch_size (int): Size of the batch for training. If set to 0, it defaults to the size of the dataset.
+    dev (str or torch.device): The device (e.g., 'cpu' or 'cuda') on which to perform the training.
+
+    Returns:
+    tuple: A tuple containing the final values of the model's parameters and the loss values:
+        - x_final (numpy.ndarray): Final optimized values of x.
+        - a0_final (numpy.ndarray): Final optimized values of a0, one of the PAU coefficients.
+        - a1_final (numpy.ndarray): Final optimized values of a1, another PAU coefficient.
+        - disp_final (numpy.ndarray): Final dispersion values after optimization.
+        - losses (list): List of loss values recorded at each training iteration.
+
     """
     # set the device to use
     torch.set_default_device(dev)
@@ -327,8 +361,43 @@ def loss_clamp_batch(x, a0, a1, disp, batch_size, mp, DATA):
     )  # correct the likelihood rescaling
 
 
-def loss_simple(x, a0, a1, disp, mp, DATA):
+def loss_clamp_batch_2(x, a0, a1, disp, batch_size, mp, DATA):
+    """
+    function that takes as input the leaf parameters and returns the loss.
+    Beware disp will need to be exp() in the main function
+    a0 is sample specific, disp and a1 only gene specific.
+    If you want to use all datapoints, set batch_size = DATA.shape[0]
+    The 'clamp' gene slope coefficient a1 is set to the fix value (1).
+    This function clamps also the intercept a0 to the initial values.
+    """
+    NC = DATA.shape[0]
+    # killing the gradient of a1
+    a1_ = torch.matmul(mp.mask, a1)
+    a1_[mp.clamp] = mp.fix
 
+    # killing the gradient of columns number 1 of a0
+    a0_ = torch.matmul(a0, mp.maskk)
+    a0_[:, mp.clamp] = mp.fixx
+
+    idx = torch.randperm(DATA.shape[0])[:batch_size]
+    y = x[idx, None] * a1_[None, :] + mp.log_n_UMI[idx, None]
+    y += torch.matmul(mp.dm[idx, :], a0_)
+    alpha = torch.exp(disp)
+
+    y = mp.cutoff * torch.tanh(y / mp.cutoff)
+    lmbda = torch.exp(y)
+
+    r = 1 / alpha
+    p = alpha * lmbda / (1 + alpha * lmbda)
+    NB = torch.distributions.NegativeBinomial(
+        total_count=r, probs=p, validate_args=None
+    )
+    return -NB.log_prob(DATA[idx, :]).sum() * (
+        NC / batch_size
+    )  # correct the likelihood rescaling
+
+
+def loss_simple(x, a0, a1, disp, mp, DATA):
     NC = DATA.shape[0]
     # killing the gradient
     a1_ = torch.matmul(mp.mask, a1)
@@ -349,26 +418,26 @@ def loss_simple(x, a0, a1, disp, mp, DATA):
     return -NB.log_prob(DATA[:, :]).sum()
 
 
-def loss_simple_batch(x, a0, a1, disp, batch_size, mp, DATA):
+# def loss_simple_batch(x, a0, a1, disp, batch_size, mp, DATA):
 
-    NC = DATA.shape[0]
-    # killing the gradient
-    a1_ = torch.matmul(mp.mask, a1)
-    a1_[mp.clamp] = mp.fix
+#     NC = DATA.shape[0]
+#     # killing the gradient
+#     a1_ = torch.matmul(mp.mask, a1)
+#     a1_[mp.clamp] = mp.fix
 
-    idx = torch.randperm(DATA.shape[0])[:batch_size]
-    y = x[idx, None] * a1_[None, :] + a0[None, :] + mp.log_n_UMI[idx, None]
-    alpha = torch.exp(disp)
+#     idx = torch.randperm(DATA.shape[0])[:batch_size]
+#     y = x[idx, None] * a1_[None, :] + a0[None, :] + mp.log_n_UMI[idx, None]
+#     alpha = torch.exp(disp)
 
-    y = mp.cutoff * torch.tanh(y / mp.cutoff)
-    lmbda = torch.exp(y)
+#     y = mp.cutoff * torch.tanh(y / mp.cutoff)
+#     lmbda = torch.exp(y)
 
-    r = 1 / alpha
-    p = alpha * lmbda / (1 + alpha * lmbda)
-    NB = torch.distributions.NegativeBinomial(
-        total_count=r, probs=p, validate_args=None
-    )
-    return -NB.log_prob(DATA[idx, :]).sum() * (NC / batch_size)
+#     r = 1 / alpha
+#     p = alpha * lmbda / (1 + alpha * lmbda)
+#     NB = torch.distributions.NegativeBinomial(
+#         total_count=r, probs=p, validate_args=None
+#     )
+#     return -NB.log_prob(DATA[idx, :]).sum() * (NC / batch_size)
 
 
 def loss_gene_selection(x, a0, a1, disp, batch_size, mp, DATA):

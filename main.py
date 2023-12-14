@@ -22,7 +22,7 @@ coef_pau = fit_coeff(data, x_unif, cfg.genes)
 
 NC, NG = data.shape
 NS = dm.shape[1]
-print(NC, NG)
+
 # here we decide the gene to clamp in order to get rid of one of the likelihood symmetries
 clamp = gene_index(data, cfg.clamp_gene)
 
@@ -46,11 +46,12 @@ x_shifted, a0_shifted, a1_shifted, xs = shift_samples_per_mouse(
     x_, a0_, a1_, sample_id, cfg.central, data
 )
 
-save_parameters(
-    x_shifted,
-    a0_shifted,
-    a1_shifted,
-    sample_names,
-    cfg.name,
-    data,
-)
+if cfg.save:
+    save_parameters(
+        x_shifted,
+        a0_shifted,
+        a1_shifted,
+        sample_names,
+        cfg.name,
+        data,
+    )
